@@ -1493,10 +1493,14 @@ async def start_scanners(msg_queue):
             raise
         except Exception as exc:
             msg_queue.put(f'[ОШИБКА {name}] {type(exc).__name__}: {exc}\n')
-    tasks = [asyncio.create_task(run_platform('TWITCH', twitch_bot.start())), asyncio.create_task(supervise_telegram(tg_client, msg_queue)), asyncio.create_task(run_platform('VK', vk_scanner(msg_queue, tg_client)))]
+    tasks = [asyncio.create_task(run_platform('TWITCH', run_twitch_reader(twitch_bot))), asyncio.create_task(supervise_telegram(tg_client, msg_queue)), asyncio.create_task(run_platform('VK', vk_scanner(msg_queue, tg_client)))]
     try:
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+async def run_twitch_reader(scanner):
+    from twitch_reader import Reader
+    await Reader(scanner, TWITCH_TOKEN, scanner.msg_queue.status).run()
