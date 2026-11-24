@@ -1,2 +1,4 @@
 aiohttp>=3.12,<4
 cryptography>=44,<47
+twitchio==2.10.0
+telethon>=1.38,<2

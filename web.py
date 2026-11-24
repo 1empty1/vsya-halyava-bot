@@ -13,14 +13,14 @@ from bot import Bot, Store, APIError
 log = logging.getLogger('halyava')
 
 class Checkpoints:
-    def __init__(self, session):
+    def __init__(self, session, filename='state.enc'):
         self.session = session
         self.repo = os.environ['STATE_REPO']
         self.headers = {'Authorization': 'Bearer '+os.environ['GITHUB_TOKEN'], 'Accept': 'application/vnd.github+json'}
         self.cipher = Fernet(os.environ['STATE_ENCRYPTION_KEY'].encode())
         self.sha = None
         self.saved_changes = -1
-        self.url = 'https://api.github.com/repos/'+self.repo+'/contents/state.enc'
+        self.url = 'https://api.github.com/repos/'+self.repo+'/contents/'+filename
 
     async def restore(self, path):
         async with self.session.get(self.url, headers=self.headers) as response:
@@ -46,7 +46,7 @@ class Checkpoints:
         path.write_bytes(raw)
 
     async def save(self, store):
-        changes = store.db.total_changes
+        changes = (store.db.total_changes, store.db.execute('PRAGMA data_version').fetchone()[0])
         if changes == self.saved_changes:
             return
         snapshot = sqlite3.connect(':memory:')
@@ -86,6 +86,9 @@ async def startup(app):
     app['healthy'] = True
     await checkpoint.save(store)
     app['worker'] = asyncio.create_task(deliver(app))
+    if os.getenv('ENABLE_SCANNER', '0') == '1':
+        from scanner_host import start
+        await start(app)
     log.info('Webhook bot ready: @%s', me['username'])
 
 async def webhook(request):
@@ -150,6 +153,9 @@ async def health(request):
     return web.json_response({'status': 'ok' if healthy else 'retrying'}, status=200 if healthy else 503)
 
 async def cleanup(app):
+    if 'scanner_runner' in app:
+        from scanner_host import stop
+        await stop(app)
     worker = app.get('worker')
     if worker:
         worker.cancel()
@@ -165,6 +171,11 @@ def make_app():
     app = web.Application(client_max_size=1024*1024)
     app.router.add_get('/healthz', health)
     app.router.add_post('/telegram', webhook)
+    async def scanner_status(request):
+        if not hmac.compare_digest(request.headers.get('X-Telegram-Bot-Api-Secret-Token',''),os.environ['WEBHOOK_SECRET']):
+            raise web.HTTPUnauthorized()
+        return web.json_response(request.app.get('scanner_status', {'enabled': False}))
+    app.router.add_get('/scanner-status', scanner_status)
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
     return app
