@@ -30,6 +30,8 @@ def parse_line(line):
 class Reader:
     def __init__(self, scanner, token, status):
         self.scanner, self.token, self.status = scanner, token, status
+        self.scanner.all_channels = sorted({n.strip().lower().lstrip('#') for n in scanner.all_channels})
+        self.unavailable = set()
         self.joined, self.pending = set(), set()
         self.nick = None
         self.turn = 0
@@ -58,7 +60,10 @@ class Reader:
             for name,item in zip(batch,data):
                 if item.get('errors'):
                     raise ValueError('Twitch channel query failed')
-                if ((item.get('data') or {}).get('user') or {}).get('stream'):
+                user = (item.get('data') or {}).get('user')
+                if user is None:
+                    self.unavailable.add(name)
+                if (user or {}).get('stream'):
                     live.add(name)
         return live
 
@@ -68,7 +73,8 @@ class Reader:
             try:
                 live = await self.live_channels(session)
                 self.status['twitch_live_total'] = len(live)
-                target = set(choose_channels(self.scanner.all_channels,live,self.turn))
+                target = set(choose_channels(set(self.scanner.all_channels)-self.unavailable,live,self.turn))
+                self.status['twitch_unavailable'] = sorted(self.unavailable)
                 self.turn += 1
                 for channel in sorted(self.joined-target):
                     await self.ws.send_str('PART #'+channel+'\r\n')
@@ -142,6 +148,11 @@ class Reader:
                                         else:self.joined.discard(channel)
                                         self.report()
                                     elif command=='NOTICE':
+                                        if 'permanently banned' in tail.lower() and args:
+                                            channel=args[0].lstrip('#').lower()
+                                            self.unavailable.add(channel)
+                                            self.pending.discard(channel)
+                                            self.status['twitch_unavailable']=sorted(self.unavailable)
                                         if 'msg_concurrent_channel_limit_reached' in line:
                                             self.blocked_until=time.time()+300
                                             self.status['twitch_last_notice']='concurrent_channel_limit_reached'
