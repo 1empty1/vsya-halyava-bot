@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: vsya-halyava-bot
+    runtime: python
+    plan: free
+    numInstances: 1
+    buildCommand: pip install -r requirements.txt
+    startCommand: python web.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: BOT_TOKEN
+        sync: false
+      - key: SOURCE_CHAT_ID
+        sync: false
+      - key: SCANNER_SENDER_IDS
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: STATE_REPO
+        sync: false
+      - key: STATE_ENCRYPTION_KEY
+        sync: false
+      - key: EXPECTED_BOT_USERNAME
+        value: vsyaHalyava_bot
+      - key: DATA_PATH
+        value: /tmp/halyava/bot.sqlite3
