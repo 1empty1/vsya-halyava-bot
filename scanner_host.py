@@ -39,7 +39,7 @@ async def start(app):
     directory = Path(os.getenv('SCANNER_DATA_DIR', '/tmp/halyava'))
     directory.mkdir(parents=True, exist_ok=True)
     path = directory/'scanner.sqlite3'
-    checkpoint = Checkpoints(app['session'], 'scanner.enc')
+    checkpoint = Checkpoints(app['snapshot_db'], 'scanner')
     for suffix in ('-wal','-shm'):
         Path(str(path)+suffix).unlink(missing_ok=True)
     await checkpoint.restore(path)
