@@ -186,8 +186,11 @@ class Admin:
             s = self.app.get('scanner_status', {})
             age = int(time.time() - s['checkpoint_at']) if s.get('checkpoint_at') else None
             pending = self.db.execute("SELECT count(*) FROM deliveries WHERE state='pending'").fetchone()[0]
+            twitch_state = {'joining':'подключаю чаты', 'waiting_limit':'ожидание освобождения лимита', 'limited':'часть чатов недоступна из-за лимита', 'connected':'читает чаты', 'connecting':'подключается', 'reconnecting':'восстанавливает связь'}.get(s.get('twitch'), s.get('twitch', 'не запущен'))
+            if s.get('twitch_retry_at'):
+                twitch_state += f" (повтор через {max(0,int(s['twitch_retry_at']-time.time()))} сек.)"
             reply = (f"📊 Telegram: {s.get('telegram', 'не запущен')}\n"
-                     f"Twitch: {s.get('twitch', 'не запущен')} — {s.get('twitch_channels', 0)}/{s.get('twitch_total', 0)} чатов\n"
+                     f"Twitch: {twitch_state} — {s.get('twitch_channels', 0)}/{s.get('twitch_total', 0)} чатов\n"
                      f"VK: {s.get('vk', 'не запущен')}\n"
                      f"Снимок сканера: {str(age) + ' сек. назад' if age is not None else 'нет данных'}\n"
                      f"Сохранение бота: {'OK' if self.app.get('checkpoint_healthy') else 'нет подтверждения'}\n"

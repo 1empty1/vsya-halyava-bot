@@ -39,12 +39,32 @@ class Reader:
         self.ready = asyncio.Event()
         self.queue = asyncio.Queue(maxsize=10000)
         self.blocked_until = 0
+        self.limit_failures = 0
 
     def report(self):
         self.status.update(twitch_channels=len(self.joined), twitch_pending=len(self.pending),
                            twitch_total=len(self.scanner.all_channels), twitch_limit=100,
                            twitch_unmonitored=len(set(self.scanner.all_channels)-self.joined),
                            twitch_policy='live-first; remaining slots rotate every 5 minutes')
+
+    def limit_reached(self, channel):
+        self.pending.discard(channel)
+        self.limit_failures += 1
+        self.blocked_until = time.time() + min(300, 30 * 2 ** min(self.limit_failures - 1, 4))
+        self.status['twitch_last_notice'] = 'concurrent_channel_limit_reached'
+        self.status['twitch_retry_at'] = int(self.blocked_until)
+        self.status['twitch'] = 'waiting_limit' if not self.joined else 'limited'
+        self.report()
+
+    def join_confirmed(self, channel):
+        self.pending.discard(channel)
+        self.joined.add(channel)
+        self.limit_failures = 0
+        self.blocked_until = 0
+        self.status['twitch'] = 'connected'
+        self.status.pop('twitch_last_notice', None)
+        self.status.pop('twitch_retry_at', None)
+        self.report()
 
     async def live_channels(self, session):
         live = set()
@@ -71,6 +91,8 @@ class Reader:
         await self.ready.wait()
         while True:
             try:
+                if self.blocked_until > time.time():
+                    await asyncio.sleep(self.blocked_until-time.time())
                 if hasattr(self.scanner, 'refresh_sources'):
                     self.scanner.refresh_sources()
                 live = await self.live_channels(session)
@@ -85,7 +107,7 @@ class Reader:
                     if not self.joined-target:
                         break
                     await asyncio.sleep(1)
-                for channel in sorted(target-self.joined):
+                for channel in sorted(target-self.joined, key=lambda name: (name not in live, name)):
                     if len(self.joined|self.pending)>=100:
                         break
                     if time.time()<self.blocked_until:
@@ -103,7 +125,8 @@ class Reader:
                 raise
             except Exception as exc:
                 log.warning('Twitch selection retry: %s',type(exc).__name__)
-            await asyncio.sleep(300)
+            delay = max(1, self.blocked_until-time.time()) if self.blocked_until else (30 if not self.joined else 300)
+            await asyncio.sleep(delay)
 
     async def consume(self):
         while True:
@@ -142,11 +165,11 @@ class Reader:
                                     if command=='PING':
                                         await ws.send_str('PONG :'+tail+'\r\n')
                                     elif command=='001':
-                                        self.status['twitch']='connected';self.ready.set()
+                                        self.status['twitch']='joining';self.ready.set()
                                     elif command in ('JOIN','PART') and prefix.split('!')[0].lower()==self.nick:
                                         channel=(args[0] if args else tail).lstrip('#').lower()
                                         self.pending.discard(channel)
-                                        if command=='JOIN':self.joined.add(channel)
+                                        if command=='JOIN':self.join_confirmed(channel)
                                         else:self.joined.discard(channel)
                                         self.report()
                                     elif command=='NOTICE':
@@ -156,8 +179,7 @@ class Reader:
                                             self.pending.discard(channel)
                                             self.status['twitch_unavailable']=sorted(self.unavailable)
                                         if 'msg_concurrent_channel_limit_reached' in line:
-                                            self.blocked_until=time.time()+300
-                                            self.status['twitch_last_notice']='concurrent_channel_limit_reached'
+                                            self.limit_reached(args[0].lstrip('#').lower() if args else '')
                                         log.warning('Twitch notice: %s',tail[:200])
                                     elif command=='RECONNECT':
                                         await ws.close()
