@@ -1,4 +1,4 @@
-"""One authenticated IRC connection, at most 100 joined channels; live-first rotation."""
+"""One authenticated IRC connection, at most 90 joined channels; live-first rotation."""
 import asyncio
 import logging
 import time
@@ -6,8 +6,9 @@ from types import SimpleNamespace
 import aiohttp
 
 log = logging.getLogger('twitch-reader')
+MAX_CHANNELS = 90
 
-def choose_channels(channels, live, turn, limit=100):
+def choose_channels(channels, live, turn, limit=MAX_CHANNELS):
     live = sorted(set(channels) & set(live))
     offline = sorted(set(channels)-set(live))
     def rotate(items):
@@ -43,7 +44,7 @@ class Reader:
 
     def report(self):
         self.status.update(twitch_channels=len(self.joined), twitch_pending=len(self.pending),
-                           twitch_total=len(self.scanner.all_channels), twitch_limit=100,
+                           twitch_total=len(self.scanner.all_channels), twitch_limit=MAX_CHANNELS,
                            twitch_unmonitored=len(set(self.scanner.all_channels)-self.joined),
                            twitch_policy='live-first; remaining slots rotate every 5 minutes')
 
@@ -108,7 +109,7 @@ class Reader:
                         break
                     await asyncio.sleep(1)
                 for channel in sorted(target-self.joined, key=lambda name: (name not in live, name)):
-                    if len(self.joined|self.pending)>=100:
+                    if len(self.joined|self.pending)>=MAX_CHANNELS:
                         break
                     if time.time()<self.blocked_until:
                         break
