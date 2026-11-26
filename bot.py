@@ -142,6 +142,8 @@ class Bot:
         chosen = self.store.preferences(user_id)
         rows = [[{'text': ('✅ ' if k in chosen else '▫️ ')+name, 'callback_data': 'toggle:'+k}] for k, name in CATEGORIES.items()]
         rows += [[{'text': '✅ Включить всё', 'callback_data': 'all'}, {'text': '🔕 Отключить всё', 'callback_data': 'stop'}]]
+        if self.admin and user_id in self.admin.owners:
+            rows.append([{'text':'🛠 Управление сканером','callback_data':'adm:home'}])
         return {'inline_keyboard': rows}
 
     async def menu(self, user_id, message_id=None):
@@ -168,6 +170,8 @@ class Bot:
     async def update(self, update):
         cb = update.get('callback_query')
         if cb:
+            if self.admin and await self.admin.callback(cb):
+                return
             user_id = cb['from']['id']
             message = cb.get('message', {})
             if message.get('chat', {}).get('id') != user_id or message.get('chat', {}).get('type') != 'private':

@@ -74,3 +74,43 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         admin=Admin(Bot('fake',reopened,-100,[1]),{}, {875615377})
         self.assertEqual(admin.jobs()[0]['name'],'example')
         reopened.db.close()
+
+    def callback(self, data, user=875615377):
+        return {'id':'click1','from':{'id':user},'data':data,'message':{'message_id':50,'chat':{'id':user,'type':'private'}}}
+
+    async def test_button_add_requires_owner_and_accepts_followup(self):
+        await self.bot.update({'callback_query':self.callback('adm:add:tg',2)})
+        self.assertEqual(self.admin.jobs(),[])
+        await self.bot.update({'callback_query':self.callback('adm:add:tg')})
+        await self.bot.update({'message':{'message_id':51,'from':{'id':875615377},'chat':{'id':875615377,'type':'private'},'text':'https://t.me/example'}})
+        self.assertEqual(self.admin.jobs()[0]['name'],'example')
+
+    async def test_cancel_stops_text_capture(self):
+        await self.bot.update({'callback_query':self.callback('adm:add:tg')})
+        await self.bot.update({'callback_query':self.callback('adm:home')})
+        await self.bot.update({'message':{'message_id':51,'from':{'id':875615377},'chat':{'id':875615377,'type':'private'},'text':'example'}})
+        self.assertEqual(self.admin.jobs(),[])
+
+    async def test_pages_and_delete_confirmation(self):
+        scanner=Store(Path(self.tmp.name)/'scanner.db')
+        scanner.db.execute('CREATE TABLE channels(id INTEGER PRIMARY KEY,name TEXT,platform TEXT)')
+        scanner.db.executemany('INSERT INTO channels(name,platform) VALUES(?,?)',[(f'channel{i:02}', 'TELEGRAM') for i in range(15)])
+        scanner.db.commit();self.admin.app['scanner_store']=scanner
+        await self.bot.update({'callback_query':self.callback('adm:list:tg:1')})
+        payload=self.bot.api.call_args.kwargs
+        self.assertIn('2 / 2',payload['text'])
+        self.assertIn('channel10',str(payload['reply_markup']))
+        await self.bot.update({'callback_query':self.callback('adm:pick:tg:11:1')})
+        self.assertEqual(self.admin.jobs(),[])
+        rows=self.bot.api.call_args.kwargs['reply_markup']['inline_keyboard']
+        confirm=rows[0][0]['callback_data']
+        await self.bot.update({'callback_query':self.callback(confirm)})
+        await self.bot.update({'callback_query':self.callback(confirm)})
+        self.assertEqual(len(self.admin.jobs()),1)
+        self.assertEqual(self.admin.jobs()[0]['name'],'channel10')
+        scanner.db.close()
+
+    async def test_regular_user_still_gets_subscription_menu(self):
+        await self.bot.update({'message':{'message_id':60,'from':{'id':2},'chat':{'id':2,'type':'private'},'text':'/start'}})
+        self.assertIn('Выбери категории',self.bot.api.call_args.kwargs['text'])
+        self.assertNotIn('adm:home',str(self.bot.api.call_args.kwargs['reply_markup']))

@@ -1,5 +1,7 @@
 """Private owner-only scanner management with durable, idempotent jobs."""
 import asyncio
+import json
+import secrets
 import logging
 import re
 import time
@@ -56,16 +58,129 @@ class Admin:
         if 'persist_event' in self.app:
             self.app['persist_event'].set()
 
-    async def handle(self, message):
+    def ui_state(self, owner):
+        return json.loads(self.bot.store.get(f'admin_ui:{owner}', '{}'))
+
+    def set_ui(self, owner, value):
+        self.bot.store.set(f'admin_ui:{owner}', json.dumps(value))
+        self.signal()
+
+    @staticmethod
+    def button(text, data):
+        return {'text': text, 'callback_data': 'adm:' + data}
+
+    async def show(self, owner, text, rows, message_id=None):
+        from bot import APIError
+        payload = dict(chat_id=owner, text=text, reply_markup={'inline_keyboard':rows})
+        if message_id:
+            try:
+                await self.bot.api('editMessageText', message_id=message_id, **payload)
+                return
+            except APIError as exc:
+                if 'not modified' in exc.description.lower():
+                    return
+                if exc.code != 400:
+                    raise
+        await self.bot.api('sendMessage', **payload)
+
+    async def home(self, owner, message_id=None):
+        self.set_ui(owner, {})
+        b=self.button
+        await self.show(owner, '🛠 Управление сканером\n\nИсточники, состояние и последние операции.\nВыбери раздел ниже.', [
+            [b('✈️ Telegram', 'list:tg:0'), b('🟣 Twitch', 'list:tw:0')],
+            [b('📊 Состояние', 'status'), b('🕘 Операции', 'jobs')],
+            [b('🎁 Мои подписки', 'subscriptions')]], message_id)
+
+    async def listing(self, owner, kind, page, message_id=None):
+        b=self.button
+        scanner=self.app.get('scanner_store')
+        platform={'tg':'TELEGRAM','tw':'TWITCH'}[kind]
+        if not scanner:
+            return await self.show(owner,'Сканер ещё запускается.',[[b('← Главное меню','home')]],message_id)
+        rows=scanner.db.execute('SELECT min(id) AS id,name FROM channels WHERE platform=? GROUP BY name ORDER BY name COLLATE NOCASE',(platform,)).fetchall()
+        pages=max(1,(len(rows)+9)//10);page=max(0,min(page,pages-1))
+        buttons=[[b('➕ Добавить канал',f'add:{kind}')]]
+        for row in rows[page*10:page*10+10]:
+            buttons.append([b('📺 '+row['name'],f"pick:{kind}:{row['id']}:{page}")])
+        nav=[]
+        if page: nav.append(b('← Назад',f'list:{kind}:{page-1}'))
+        nav.append(b(f'{page+1} / {pages}',f'list:{kind}:{page}'))
+        if page+1<pages: nav.append(b('Вперёд →',f'list:{kind}:{page+1}'))
+        buttons.extend([nav,[b('⌂ Главное меню','home')]])
+        await self.show(owner,f"{'✈️ Telegram' if kind=='tg' else '🟣 Twitch'} · {len(rows)} источников\nСтраница {page+1} / {pages}\n\nНажми на канал, чтобы убрать его из сканирования.",buttons,message_id)
+
+    async def callback(self, cb):
+        data=cb.get('data','')
+        if not data.startswith('adm:'):return False
+        owner=cb.get('from',{}).get('id');message=cb.get('message',{});chat=message.get('chat',{})
+        from bot import APIError
+        allowed=owner in self.owners and chat.get('id')==owner and chat.get('type')=='private'
+        try:
+            await self.bot.api('answerCallbackQuery', callback_query_id=cb['id'], **({} if allowed else {'text':'Нет доступа','show_alert':True}))
+        except APIError:pass
+        if not allowed:return True
+        mid=message.get('message_id');parts=data.split(':');action=parts[1];b=self.button
+        if action=='confirm':
+            state=self.ui_state(owner)
+            if state.get('mode')!='delete' or state.get('token')!=parts[-1]:
+                await self.show(owner,'Эта кнопка уже использована или устарела.',[[b('⌂ Главное меню','home')]],mid)
+                return True
+            with self.db:
+                # Negative IDs reserve a separate idempotency namespace for button operations.
+                self.db.execute('INSERT OR IGNORE INTO admin_jobs(chat_id,message_id,action,platform,name) VALUES(?,?,?,?,?)',
+                    (owner,-int(state['token'],16),'delete',state['platform'],state['name']))
+                self.db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',(f'admin_ui:{owner}','{}'))
+            self.signal()
+            await self.show(owner,'⏳ Удаление принято. Сообщу результат после сохранения.',[[b('📋 К списку',f"list:{state['kind']}:{state['page']}"),b('🕘 Операции','jobs')]],mid)
+            return True
+        self.set_ui(owner,{})
+        if action=='home':await self.home(owner,mid)
+        elif action=='subscriptions':await self.bot.menu(owner,mid)
+        elif action=='list' and len(parts)==4 and parts[2] in ('tg','tw') and parts[3].isdigit():
+            await self.listing(owner,parts[2],int(parts[3]),mid)
+        elif action=='add' and len(parts)==3 and parts[2] in ('tg','tw'):
+            kind=parts[2];self.set_ui(owner,{'mode':'add','kind':kind,'expires':time.time()+900})
+            await self.show(owner,('✈️ Новый Telegram-канал' if kind=='tg' else '🟣 Новый Twitch-канал')+'\n\nПришли следующим сообщением ссылку или @username.\n'+('Публичный канал; сканер подпишется своим аккаунтом.' if kind=='tg' else 'Канал включится при следующем выборе чатов, обычно до 7 минут.'),[[b('Отмена','home')]],mid)
+        elif action=='pick' and len(parts)==5 and parts[2] in ('tg','tw') and parts[3].isdigit() and parts[4].isdigit():
+            kind=parts[2];platform={'tg':'TELEGRAM','tw':'TWITCH'}[kind];scanner=self.app.get('scanner_store')
+            row=scanner.db.execute('SELECT name FROM channels WHERE id=? AND platform=?',(int(parts[3]),platform)).fetchone() if scanner else None
+            if not row:
+                await self.listing(owner,kind,int(parts[4]),mid)
+                return True
+            try:name=normalize_channel(row['name'],platform)
+            except ValueError:
+                await self.show(owner,'У этого старого источника нестандартный адрес. Удаление кнопкой пока недоступно.',[[b('← Назад',f'list:{kind}:{parts[4]}')]],mid)
+                return True
+            token=secrets.token_hex(6)
+            self.set_ui(owner,{'mode':'delete','token':token,'name':name,'platform':platform,'kind':kind,'page':int(parts[4])})
+            await self.show(owner,f'Убрать {name} из сканирования?\n\n'+('Аккаунт останется подписан на Telegram-канал.' if kind=='tg' else 'Изменение применится при следующем выборе чатов.'),[[b('🗑 Да, убрать','confirm:'+token)],[b('← Отмена',f'list:{kind}:{parts[4]}')]],mid)
+        elif action in ('status','jobs'):
+            await self.handle({'from':{'id':owner},'chat':chat,'message_id':mid,'text':'/'+action}, panel_id=mid)
+        else:await self.home(owner,mid)
+        return True
+
+    async def handle(self, message, panel_id=None):
         text = message.get('text') or ''
         parts = text.split()
         cmd = parts[0].split('@')[0].lower() if parts else ''
-        if cmd not in COMMANDS:
-            return False
         chat = message.get('chat', {})
         sender = message.get('from', {}).get('id')
         if chat.get('type') != 'private' or sender not in self.owners or chat.get('id') != sender:
+            return cmd in COMMANDS
+        state=self.ui_state(sender)
+        if cmd == '/admin':
+            await self.home(sender, panel_id)
             return True
+        if cmd not in COMMANDS:
+            if text.startswith('/'):
+                self.set_ui(sender,{})
+                return False
+            if state.get('mode')!='add':return False
+            if state.get('expires',0)<time.time():
+                await self.home(sender)
+                return True
+            cmd='/addtg' if state['kind']=='tg' else '/addtwitch'
+            parts=[cmd,text.strip()]
         reply = HELP
         if cmd == '/status':
             s = self.app.get('scanner_status', {})
@@ -79,7 +194,8 @@ class Admin:
                      f"Очередь личной рассылки: {pending}\n/status не доказывает доставку каждого поста.")
         elif cmd == '/jobs':
             rows = self.db.execute('SELECT * FROM admin_jobs ORDER BY id DESC LIMIT 10').fetchall()
-            reply = '\n'.join(f"#{r['id']} {r['action']} {r['platform']} {r['name']}: {r['state']} {r['result']}" for r in rows) or 'Операций пока нет.'
+            states={'pending':'⏳ В очереди','notify':'📨 Отправляю результат','done':'✅ Завершено'}
+            reply = '🕘 Последние операции\n\n' + ('\n\n'.join(f"#{r['id']} · {'Добавление' if r['action']=='add' else 'Удаление'} · {r['name']}\n{states.get(r['state'],r['state'])}\n{r['result']}" for r in rows) or 'Операций пока нет.')
         elif cmd == '/channels':
             scanner = self.app.get('scanner_store')
             platform = {'tg': 'TELEGRAM', 'telegram': 'TELEGRAM', 'twitch': 'TWITCH'}.get(parts[1].lower() if len(parts)>1 else 'tg')
@@ -105,10 +221,17 @@ class Admin:
                     self.db.execute('INSERT OR IGNORE INTO admin_jobs(chat_id,message_id,action,platform,name) VALUES(?,?,?,?,?)',
                                     (sender,message['message_id'],'add' if cmd.startswith('/add') else 'delete',platform,name))
                 self.signal()
-                reply = 'Операция принята. Результат появится здесь; /jobs — история.'
+                self.set_ui(sender,{})
+                reply = '⏳ Операция принята. Сообщу результат после сохранения.'
             except ValueError as exc:
                 reply = str(exc)
-        await self.bot.api('sendMessage', chat_id=sender, text=reply)
+        b=self.button
+        rows=[[b('⌂ Главное меню','home')]]
+        if cmd in ('/status','/jobs'):
+            rows.insert(0,[b('🔄 Обновить',cmd[1:])])
+        elif state.get('mode')=='add':
+            rows.insert(0,[b('➕ Ещё канал','add:'+state['kind']),b('📋 К списку','list:'+state['kind']+':0')])
+        await self.show(sender,reply,rows,panel_id)
         return True
 
     async def apply(self, row):
@@ -178,7 +301,7 @@ class Admin:
                             self.db.execute("UPDATE admin_jobs SET state='notify',result=? WHERE id=?", (result, row['id']))
                         await self.app['checkpoint'].save(self.bot.store)
                     result = self.db.execute('SELECT result FROM admin_jobs WHERE id=?', (row['id'],)).fetchone()[0]
-                    await self.bot.api('sendMessage', chat_id=row['chat_id'], text=result)
+                    await self.show(row['chat_id'],result,[[self.button('📋 К списку','list:'+('tg' if row['platform']=='TELEGRAM' else 'tw')+':0'),self.button('⌂ Главное меню','home')]])
                     with self.db:
                         self.db.execute("UPDATE admin_jobs SET state='done' WHERE id=?", (row['id'],))
                     self.signal()
