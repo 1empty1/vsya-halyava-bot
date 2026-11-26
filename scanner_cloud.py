@@ -587,6 +587,49 @@ def _extract_case_info(text, code):
     return (case_name, case_link)
 CASE_URL_RE = re.compile('https?://(?:www\\.)?(?:jabka\\.to|magic-drop\\.win)/case/[^\\s)]+', re.IGNORECASE)
 
+def rich_message_content(message):
+    """Read visible rich-message blocks, captions and buttons, excluding media metadata."""
+    rich = getattr(message, 'rich_message', None)
+    if rich is None:
+        return '', {}
+    data = rich.to_dict()
+    labels = {}
+
+    def walk(node):
+        if isinstance(node, str):
+            return node
+        if isinstance(node, list):
+            return '\n'.join(filter(None, (walk(item) for item in node)))
+        if not isinstance(node, dict):
+            return ''
+        kind = node.get('_', '')
+        if kind == 'TextConcat':
+            return ''.join(walk(item) for item in node.get('texts', []))
+        if kind == 'TextCustomEmoji':
+            return node.get('alt', '')
+        text = walk(node.get('text'))
+        url = node.get('url')
+        if kind == 'PageButton':
+            url = (node.get('type') or {}).get('url')
+        if url and isinstance(url, str):
+            if text:
+                labels.setdefault(url, text)
+            text = text + ' (' + url + ')' if text else url
+        parts = [text]
+        for key in ('caption', 'credit', 'blocks', 'items', 'buttons', 'title', 'author', 'rows', 'cells', 'list', 'details'):
+            if key in node:
+                parts.append(walk(node[key]))
+        return '\n'.join(part for part in parts if part)
+
+    return walk(data.get('blocks', [])), labels
+
+
+def telegram_message_text(message):
+    ordinary = getattr(message, 'message', None) or ''
+    rich, _ = rich_message_content(message)
+    return '\n'.join(part for part in (ordinary, rich) if part)
+
+
 def inline_entity_links(message):
     """Текст сообщения, где после каждой вшитой ссылки стоит её адрес в скобках.
 
@@ -598,8 +641,9 @@ def inline_entity_links(message):
     from telethon.tl.types import MessageEntityTextUrl
     text = getattr(message, 'message', None) or ''
     ents = [e for e in getattr(message, 'entities', None) or [] if isinstance(e, MessageEntityTextUrl) and e.url]
+    rich, rich_labels = rich_message_content(message)
     if not ents:
-        return (text, {})
+        return ('\n'.join(part for part in (text, rich) if part), rich_labels)
     s = helpers.add_surrogate(text)
     labels = {}
     for e in sorted(ents, key=lambda e: e.offset + e.length, reverse=True):
@@ -610,7 +654,8 @@ def inline_entity_links(message):
         if label and (not labels.get(e.url)):
             labels[e.url] = label
         s = s[:end] + f' ({e.url})' + s[end:]
-    return (helpers.del_surrogate(s), labels)
+    labels.update(rich_labels)
+    return ('\n'.join(part for part in (helpers.del_surrogate(s), rich) if part), labels)
 
 def find_case_link_for_code(text, code):
     """Ссылка на кейс для кода: (адрес, позиция) или None.
@@ -1230,7 +1275,7 @@ async def start_scanners(msg_queue):
         event_keys.update(telegram_channel_keys(chat_title))
         is_target = bool(configured_keys.intersection(event_keys))
         if _chat_key(event.chat_id) == _chat_key(JABKA_CHAT_ID) or (chat_username or '').lower() == JABKA_CHAT_USERNAME:
-            chat_text = event.raw_text or ''
+            chat_text = telegram_message_text(event.message)
             chat_links_src, _ = inline_entity_links(event.message)
             msg_id = event.message.id
             mask_in_chat = extract_mask_codes(chat_text)
@@ -1279,7 +1324,7 @@ async def start_scanners(msg_queue):
             return
         if is_target:
             timing_log.info('RECEIVE chat=%s post=%s kind=%s age=%s lookup=%.3fs', event.chat_id, event.message.id, 'edit' if getattr(event.message, 'edit_date', None) else 'new', round(age, 3) if age is not None else 'unknown', time.monotonic() - received_at)
-            text = event.raw_text
+            text = telegram_message_text(event.message)
             post_id = event.message.id
             link_src, link_labels = inline_entity_links(event.message)
             raffles_upgrader_matches = RAFFLES_UPGRADER_PATTERN.findall(text)
@@ -1318,7 +1363,7 @@ async def start_scanners(msg_queue):
             channel_name = chat_username or chat_title or str(chat_id)
             for raffle_code in all_upgrader_raffles_tg:
                 raffle_url = None
-                for link in ANY_UPGRADER_LINK.findall(text + ' ' + link_src):
+                for link in ANY_UPGRADER_RAFFLE.findall(text + ' ' + link_src) + ANY_UPGRADER_RAFFLE_USERNAME.findall(text + ' ' + link_src):
                     if raffle_code in link:
                         raffle_url = link
                         break
