@@ -122,6 +122,9 @@ async def startup(app):
     if os.getenv('ENABLE_SCANNER', '0') == '1':
         from scanner_host import start
         await start(app)
+    from admin import Admin
+    bot.admin = Admin(bot, app, {int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()})
+    app['admin_worker'] = asyncio.create_task(bot.admin.worker())
     log.info('Webhook bot ready: @%s', me['username'])
 
 async def webhook(request):
@@ -202,6 +205,9 @@ async def health(request):
     return web.json_response({'status': 'ok' if healthy else 'retrying'}, status=200 if healthy else 503)
 
 async def cleanup(app):
+    if app.get('admin_worker'):
+        app['admin_worker'].cancel()
+        await asyncio.gather(app['admin_worker'], return_exceptions=True)
     if 'scanner_runner' in app:
         from scanner_host import stop
         await stop(app)

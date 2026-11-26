@@ -61,7 +61,7 @@ async def start(app):
     async def run():
         while True:
             try:
-                await scanner.start_scanners(queue)
+                await scanner.start_scanners(queue, app)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

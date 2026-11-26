@@ -1009,6 +1009,9 @@ class TwitchScanner(commands.Bot):
         self.connected_count = 0
         self.msg_queue.put(f'[TWITCH] Инициализация... Всего каналов: {len(channels)}\n')
 
+    def refresh_sources(self):
+        self.all_channels = sorted({name.strip().lower().lstrip('#') for name in get_channels('TWITCH')})
+
     async def event_ready(self):
         self.msg_queue.put(f'[TWITCH] IRC подключен. Начинаю подключение к каналам...\n')
         await self._connect_channels_gradually()
@@ -1248,10 +1251,12 @@ async def vk_scanner(msg_queue, tg_client):
                     pass
             await asyncio.sleep(3)
 
-async def start_scanners(msg_queue):
+async def start_scanners(msg_queue, runtime=None):
     timing_log = setup_timing_log(os.path.join(APP_DIR, 'telegram_timing.log'))
     twitch_bot = TwitchScanner(msg_queue)
     tg_client = TimedTelegramClient(StringSession(os.environ['TG_STRING_SESSION']), TG_API_ID, TG_API_HASH, timeout=8, request_retries=3, connection_retries=2, retry_delay=1, catch_up=True)
+    if runtime is not None:
+        runtime['scanner_telegram_client'] = tg_client
     twitch_bot.tg_client = tg_client
     comments_client = tg_client
 

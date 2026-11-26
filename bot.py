@@ -129,6 +129,7 @@ class Bot:
     def __init__(self, token, store, source_chat, senders):
         self.token, self.store, self.source_chat, self.senders = token, store, source_chat, set(senders)
         self.session = None
+        self.admin = None
 
     async def api(self, method, **payload):
         async with self.session.post('https://api.telegram.org/bot'+self.token+'/'+method, json=payload) as response:
@@ -151,6 +152,8 @@ class Bot:
                 'Включено: '+(', '.join(v for k, v in CATEGORIES.items() if k in chosen) or 'ничего')+
                 '\n\nПриходят только новые публикации после включения категории.\n'
                 '/menu — изменить выбор · /stop — отключить рассылку')
+        if self.admin and user_id in self.admin.owners:
+            text += '\n\n🛠 /admin — управление сканером'
         payload = dict(chat_id=user_id, text=text, reply_markup=self.keyboard(user_id))
         if message_id:
             try:
@@ -191,6 +194,8 @@ class Bot:
         chat = message['chat']
         text = message.get('text') or message.get('caption') or ''
         if chat['type'] == 'private':
+            if self.admin and await self.admin.handle(message):
+                return
             cmd = text.split(maxsplit=1)[0].split('@')[0] if text else ''
             if cmd == '/stop':
                 self.store.stop(chat['id'])

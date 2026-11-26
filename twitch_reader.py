@@ -71,6 +71,8 @@ class Reader:
         await self.ready.wait()
         while True:
             try:
+                if hasattr(self.scanner, 'refresh_sources'):
+                    self.scanner.refresh_sources()
                 live = await self.live_channels(session)
                 self.status['twitch_live_total'] = len(live)
                 target = set(choose_channels(set(self.scanner.all_channels)-self.unavailable,live,self.turn))
