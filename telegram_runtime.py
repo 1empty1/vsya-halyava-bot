@@ -92,3 +92,67 @@ async def supervise_telegram(client, queue, *, interval=10, probe_timeout=8,
             except (Exception, asyncio.CancelledError):
                 pass
         await asyncio.sleep(retry_delay)
+
+
+class ChatResolver:
+    """Reuse chat entities; retry lookup failures without discarding the event."""
+    def __init__(self, retry_delay=10, timeout=12):
+        self.cache = {}
+        self.locks = {}
+        self.slots = asyncio.Semaphore(2)
+        self.retry_delay = retry_delay
+        self.timeout = timeout
+        self.log = logging.getLogger('scanner.telegram.lookup')
+
+    async def resolve(self, event):
+        key = event.chat_id
+        if key is None:
+            return None
+        chat = event.chat
+        if chat is not None:
+            self.cache[key] = chat
+            return chat
+        if key in self.cache:
+            return self.cache[key]
+        async with self.locks.setdefault(key, asyncio.Lock()):
+            attempt = 0
+            while True:
+                if key in self.cache:
+                    return self.cache[key]
+                try:
+                    async with self.slots:
+                        # A background warm-up or another event may have resolved it.
+                        if key in self.cache:
+                            return self.cache[key]
+                        async with asyncio.timeout(self.timeout):
+                            chat = await event.get_chat()
+                    if chat is not None:
+                        self.cache[key] = chat
+                        return chat
+                    raise ValueError('Chat entity not available yet')
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    attempt += 1
+                    delay = max(self.retry_delay, getattr(exc, 'seconds', 0))
+                    self.log.warning('Chat lookup deferred chat=%s attempt=%s reason=%s; event retained', key, attempt, type(exc).__name__)
+                    await asyncio.sleep(delay)
+
+    async def warm(self, client):
+        """Populate in the background; a failing dialog request never blocks known posts."""
+        while True:
+            delay = 600
+            try:
+                if not client.is_connected():
+                    await asyncio.sleep(2)
+                    continue
+                async for dialog in client.iter_dialogs():
+                    if dialog.entity is not None:
+                        self.cache[dialog.id] = dialog.entity
+                self.log.info('Telegram chat cache ready: %s entities', len(self.cache))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                delay = max(30, getattr(exc, 'seconds', 0))
+                self.log.warning('Chat cache refresh will retry: %s', type(exc).__name__)
+            await asyncio.sleep(delay)

@@ -12,7 +12,7 @@ from twitchio.ext import commands
 from telethon import TelegramClient, events
 from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 import os
-from telegram_runtime import TimedTelegramClient, supervise_telegram, setup_timing_log, event_age, telegram_status
+from telegram_runtime import ChatResolver, TimedTelegramClient, supervise_telegram, setup_timing_log, event_age, telegram_status
 APP_DIR = os.getenv('SCANNER_DATA_DIR', '/tmp/halyava')
 DB_PATH = os.path.join(APP_DIR, 'scanner.sqlite3')
 PROMO_PATTERN = re.compile('MD-[A-Z0-9\\*?]{4}-[A-Z0-9\\*?]{4}(?:-[A-Z0-9\\*?]{0,4})?', re.IGNORECASE)
@@ -1259,12 +1259,13 @@ async def start_scanners(msg_queue, runtime=None):
         runtime['scanner_telegram_client'] = tg_client
     twitch_bot.tg_client = tg_client
     comments_client = tg_client
+    chat_resolver = ChatResolver()
 
     @tg_client.on(events.NewMessage(incoming=True, outgoing=True))
     async def tg_handler(event):
         received_at = time.monotonic()
         age = event_age(event.message)
-        chat = await event.get_chat()
+        chat = await chat_resolver.resolve(event)
         if not chat:
             return
         chat_id = str(event.chat_id)
@@ -1543,7 +1544,7 @@ async def start_scanners(msg_queue, runtime=None):
             raise
         except Exception as exc:
             msg_queue.put(f'[ОШИБКА {name}] {type(exc).__name__}: {exc}\n')
-    tasks = [asyncio.create_task(run_platform('TWITCH', run_twitch_reader(twitch_bot))), asyncio.create_task(supervise_telegram(tg_client, msg_queue)), asyncio.create_task(run_platform('VK', vk_scanner(msg_queue, tg_client)))]
+    tasks = [asyncio.create_task(chat_resolver.warm(tg_client)), asyncio.create_task(run_platform('TWITCH', run_twitch_reader(twitch_bot))), asyncio.create_task(supervise_telegram(tg_client, msg_queue)), asyncio.create_task(run_platform('VK', vk_scanner(msg_queue, tg_client)))]
     try:
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
